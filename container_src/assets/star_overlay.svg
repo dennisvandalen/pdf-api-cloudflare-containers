@@ -1,0 +1,6 @@
+<svg width="750" height="750" viewBox="0 0 750 750" xmlns="http://www.w3.org/2000/svg">
+  <circle cx="375" cy="375" r="160" class="stars" fill="#000000" />
+  <line x1="150" y1="150" x2="600" y2="600" class="constLines1" stroke="#000000" stroke-width="8" />
+  <line x1="600" y1="150" x2="150" y2="600" class="constLines2" stroke="#000000" stroke-width="8" />
+  <circle cx="375" cy="375" r="240" class="constLines3" fill="none" stroke="#000000" stroke-width="6" />
+</svg>

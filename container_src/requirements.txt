@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+cairosvg
+pikepdf
+pypdf
+pypdfium2
+Pillow
+python-multipart
+numpy
