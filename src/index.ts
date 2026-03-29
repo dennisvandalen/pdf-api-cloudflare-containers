@@ -211,4 +211,13 @@ app.post("/quick-preview/upload", async (c) => {
   return await container.fetch(req);
 });
 
+// Proxy GET /optimize-starringyou/:id to container
+app.get("/optimize-starringyou/:id", async (c) => {
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL(`/optimize-starringyou/${c.req.param("id")}`, "http://container"));
+  return await container.fetch(req);
+});
+
 export default app;

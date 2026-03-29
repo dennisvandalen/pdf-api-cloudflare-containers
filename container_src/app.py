@@ -140,7 +140,9 @@ def _resolve_input_path(path_or_url: str, fallback_ext: str) -> str:
         parsed = urlparse(path_or_url)
         ext = Path(parsed.path).suffix or fallback_ext
         dest = TMP_DIR / f"input-{uuid.uuid4().hex}{ext}"
-        urllib.request.urlretrieve(path_or_url, dest)
+        req = urllib.request.Request(path_or_url, headers={"User-Agent": "PDF-API/1.0"})
+        with urllib.request.urlopen(req) as resp, open(dest, "wb") as f:
+            f.write(resp.read())
         return str(dest)
     # Map /data/... to container path /app/data/...
     if path_or_url.startswith("/data/"):
@@ -1080,63 +1082,7 @@ async def quick_preview_upload(file: UploadFile = File(...), page: int = Form(0)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/optimize/{poster_id}")
-async def optimize_poster(poster_id: str):
+@app.get("/optimize-starringyou/{poster_id}")
+async def optimize_starringyou_poster(poster_id: str):
     pdf_url = f"https://starringyou-rendering.vandalen.workers.dev/?posterId={poster_id}"
-    return await optimize(OptimizeRequest(input_pdf=pdf_url))
-
-
-class OptimizeRequest(BaseModel):
-    input_pdf: str
-    compatibility_level: float = 1.4
-    pdf_settings: str = Field(default="/prepress", pattern="^/(screen|ebook|printer|prepress|default)$")
-
-
-@app.post("/optimize")
-async def optimize(req: OptimizeRequest):
-    try:
-        input_path = _resolve_input_path(req.input_pdf, ".pdf")
-        output_path = TMP_DIR / f"optimized-{uuid.uuid4().hex}.pdf"
-        try:
-            result = subprocess.run([
-                "gs", "-dNOPAUSE", "-dBATCH", "-dSAFER",
-                "-sDEVICE=pdfwrite",
-                f"-dCompatibilityLevel={req.compatibility_level}",
-                f"-dPDFSETTINGS={req.pdf_settings}",
-                "-dDetectDuplicateImages=true",
-                "-dCompressFonts=true",
-                f"-sOutputFile={output_path}",
-                str(input_path),
-            ], capture_output=True, text=True)
-            if result.returncode != 0:
-                return JSONResponse(status_code=500, content={
-                    "step": "ghostscript-optimize",
-                    "error": "Ghostscript optimization failed",
-                    "stderr": result.stderr,
-                    "stdout": result.stdout,
-                })
-        except Exception as e:
-            return JSONResponse(status_code=500, content={
-                "step": "ghostscript-optimize",
-                "error": str(e),
-            })
-        return FileResponse(path=str(output_path), media_type="application/pdf", filename="optimized.pdf")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/optimize/upload")
-async def optimize_upload(
-    file: UploadFile = File(...),
-    compatibility_level: float = Form(1.4),
-    pdf_settings: str = Form("/prepress"),
-):
-    try:
-        tmp_path = await _save_upload_tmp(file, ".pdf")
-        return await optimize(OptimizeRequest(
-            input_pdf=str(tmp_path),
-            compatibility_level=compatibility_level,
-            pdf_settings=pdf_settings,
-        ))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return await flatten(FlattenRequest(input_pdf=pdf_url, dpi=300))
