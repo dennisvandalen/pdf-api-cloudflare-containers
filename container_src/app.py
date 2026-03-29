@@ -1080,6 +1080,12 @@ async def quick_preview_upload(file: UploadFile = File(...), page: int = Form(0)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/optimize/{poster_id}")
+async def optimize_poster(poster_id: str):
+    pdf_url = f"https://starringyou-rendering.vandalen.workers.dev/?posterId={poster_id}"
+    return await optimize(OptimizeRequest(input_pdf=pdf_url))
+
+
 class OptimizeRequest(BaseModel):
     input_pdf: str
     compatibility_level: float = 1.4
