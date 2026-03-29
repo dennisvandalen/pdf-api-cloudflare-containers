@@ -1078,3 +1078,59 @@ async def quick_preview_upload(file: UploadFile = File(...), page: int = Form(0)
         return await quick_preview(QuickPreviewRequest(input_pdf=str(tmp_path), page=page, max_size=max_size))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class OptimizeRequest(BaseModel):
+    input_pdf: str
+    compatibility_level: float = 1.4
+    pdf_settings: str = Field(default="/prepress", pattern="^/(screen|ebook|printer|prepress|default)$")
+
+
+@app.post("/optimize")
+async def optimize(req: OptimizeRequest):
+    try:
+        input_path = _resolve_input_path(req.input_pdf, ".pdf")
+        output_path = TMP_DIR / f"optimized-{uuid.uuid4().hex}.pdf"
+        try:
+            result = subprocess.run([
+                "gs", "-dNOPAUSE", "-dBATCH", "-dSAFER",
+                "-sDEVICE=pdfwrite",
+                f"-dCompatibilityLevel={req.compatibility_level}",
+                f"-dPDFSETTINGS={req.pdf_settings}",
+                "-dDetectDuplicateImages=true",
+                "-dCompressFonts=true",
+                f"-sOutputFile={output_path}",
+                str(input_path),
+            ], capture_output=True, text=True)
+            if result.returncode != 0:
+                return JSONResponse(status_code=500, content={
+                    "step": "ghostscript-optimize",
+                    "error": "Ghostscript optimization failed",
+                    "stderr": result.stderr,
+                    "stdout": result.stdout,
+                })
+        except Exception as e:
+            return JSONResponse(status_code=500, content={
+                "step": "ghostscript-optimize",
+                "error": str(e),
+            })
+        return FileResponse(path=str(output_path), media_type="application/pdf", filename="optimized.pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/optimize/upload")
+async def optimize_upload(
+    file: UploadFile = File(...),
+    compatibility_level: float = Form(1.4),
+    pdf_settings: str = Form("/prepress"),
+):
+    try:
+        tmp_path = await _save_upload_tmp(file, ".pdf")
+        return await optimize(OptimizeRequest(
+            input_pdf=str(tmp_path),
+            compatibility_level=compatibility_level,
+            pdf_settings=pdf_settings,
+        ))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
