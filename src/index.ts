@@ -4,7 +4,7 @@ import { Hono } from "hono";
 // Durable Object class for the Python PDF API container
 export class MyContainer extends Container<Env> {
   defaultPort = 8080;
-  sleepAfter = "10m"; // Keep warm longer to avoid cold starts
+  sleepAfter = "5m";
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -211,12 +211,68 @@ app.post("/quick-preview/upload", async (c) => {
   return await container.fetch(req);
 });
 
+// Proxy GET/POST /debug
+app.get("/debug", async (c) => {
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL("/debug", "http://container"));
+  return await container.fetch(req);
+});
+
+app.post("/debug", async (c) => {
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL("/debug", "http://container"), {
+    method: "POST",
+    headers: c.req.raw.headers,
+    body: c.req.raw.body,
+  });
+  return await container.fetch(req);
+});
+
+// Proxy POST /spot-color-layer
+app.post("/spot-color-layer", async (c) => {
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL("/spot-color-layer", "http://container"), {
+    method: "POST",
+    headers: c.req.raw.headers,
+    body: c.req.raw.body,
+  });
+  return await container.fetch(req);
+});
+
+// Proxy POST /image-with-spot-color
+app.post("/image-with-spot-color", async (c) => {
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL("/image-with-spot-color", "http://container"), {
+    method: "POST",
+    headers: c.req.raw.headers,
+    body: c.req.raw.body,
+  });
+  return await container.fetch(req);
+});
+
 // Proxy GET /optimize-starringyou/:id to container
 app.get("/optimize-starringyou/:id", async (c) => {
   const container = c.env.PDF_API.get(
     c.env.PDF_API.idFromName("/pdf-api-singleton"),
   );
   const req = new Request(new URL(`/optimize-starringyou/${c.req.param("id")}`, "http://container"));
+  return await container.fetch(req);
+});
+
+// Proxy GET /optimize-starringyou-gs/:id to container
+app.get("/optimize-starringyou-gs/:id", async (c) => {
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL(`/optimize-starringyou-gs/${c.req.param("id")}`, "http://container"));
   return await container.fetch(req);
 });
 

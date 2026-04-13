@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi import UploadFile, File, Form
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from pathlib import Path
@@ -15,7 +15,10 @@ import numpy as np
 import xml.etree.ElementTree as ET
 import urllib.request
 from urllib.parse import urlparse
+import io
 import uuid
+import zlib
+import base64
 import os
 
 app = FastAPI()
@@ -1082,7 +1085,591 @@ async def quick_preview_upload(file: UploadFile = File(...), page: int = Form(0)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _create_spot_color_pdf_from_image(image_path: str, spot_name: str, dpi: int, include_image: bool = False) -> Path:
+    """Create a PDF with a Separation (spot) color layer from an image's alpha channel.
+
+    Every non-transparent pixel becomes a spot-color pixel; the alpha value
+    controls the tint (255 = full tint, 0 = no ink).
+    If include_image is True, the original image is drawn as CMYK underneath.
+    """
+    img = Image.open(image_path).convert("RGBA")
+    alpha = img.split()[3]  # 0 = transparent, 255 = opaque
+    width_px, height_px = img.size
+
+    # Page size in points at the given DPI
+    width_pt = width_px * 72.0 / dpi
+    height_pt = height_px * 72.0 / dpi
+
+    # Alpha channel as raw bytes (single component per pixel)
+    alpha_bytes = alpha.tobytes()
+
+    output_pdf = TMP_DIR / f"spot-{uuid.uuid4().hex}.pdf"
+
+    with pikepdf.new() as pdf:
+        pdf.add_blank_page(page_size=(width_pt, height_pt))
+        page = pdf.pages[0]
+        page["/Resources"] = pikepdf.Dictionary()
+
+        resources = page["/Resources"]
+        resources["/ColorSpace"] = pikepdf.Dictionary()
+        resources["/XObject"] = pikepdf.Dictionary()
+
+        content_parts = []
+
+        # Original image as RGB base layer with alpha mask
+        if include_image:
+            rgb_img = img.convert("RGB")
+            rgb_bytes = zlib.compress(rgb_img.tobytes())
+            base_stream = pikepdf.Stream(pdf, rgb_bytes)
+            base_stream["/Type"] = pikepdf.Name("/XObject")
+            base_stream["/Subtype"] = pikepdf.Name("/Image")
+            base_stream["/Width"] = width_px
+            base_stream["/Height"] = height_px
+            base_stream["/ColorSpace"] = pikepdf.Name("/DeviceRGB")
+            base_stream["/BitsPerComponent"] = 8
+            base_stream["/Filter"] = pikepdf.Name("/FlateDecode")
+
+            # SMask for transparency
+            smask_stream = pikepdf.Stream(pdf, zlib.compress(alpha_bytes))
+            smask_stream["/Type"] = pikepdf.Name("/XObject")
+            smask_stream["/Subtype"] = pikepdf.Name("/Image")
+            smask_stream["/Width"] = width_px
+            smask_stream["/Height"] = height_px
+            smask_stream["/ColorSpace"] = pikepdf.Name("/DeviceGray")
+            smask_stream["/BitsPerComponent"] = 8
+            smask_stream["/Filter"] = pikepdf.Name("/FlateDecode")
+            base_stream["/SMask"] = smask_stream
+
+            resources["/XObject"]["/BaseImg"] = base_stream
+
+            content_parts.append(
+                f"q\n"
+                f"{width_pt:.4f} 0 0 {height_pt:.4f} 0 0 cm\n"
+                f"/BaseImg Do\n"
+                f"Q\n"
+            )
+
+        # Separation color space
+        tint_transform = pikepdf.Dictionary(
+            FunctionType=2,
+            Domain=[0, 1],
+            C0=[0, 0, 0, 0],
+            C1=[0, 0.9, 0, 0],
+            N=1,
+        )
+        resources["/ColorSpace"]["/SpotCS"] = pikepdf.Array([
+            pikepdf.Name("/Separation"),
+            pikepdf.Name(f"/{spot_name}"),
+            pikepdf.Name("/DeviceCMYK"),
+            tint_transform,
+        ])
+
+        # Image XObject using the Separation color space
+        compressed = zlib.compress(alpha_bytes)
+        img_stream = pikepdf.Stream(pdf, compressed)
+        img_stream["/Type"] = pikepdf.Name("/XObject")
+        img_stream["/Subtype"] = pikepdf.Name("/Image")
+        img_stream["/Width"] = width_px
+        img_stream["/Height"] = height_px
+        img_stream["/ColorSpace"] = pikepdf.Array([
+            pikepdf.Name("/Separation"),
+            pikepdf.Name(f"/{spot_name}"),
+            pikepdf.Name("/DeviceCMYK"),
+            tint_transform,
+        ])
+        img_stream["/BitsPerComponent"] = 8
+        img_stream["/Filter"] = pikepdf.Name("/FlateDecode")
+        resources["/XObject"]["/SpotImg"] = img_stream
+
+        # ExtGState with overprint enabled
+        resources["/ExtGState"] = pikepdf.Dictionary()
+        resources["/ExtGState"]["/GS1"] = pikepdf.Dictionary(
+            Type=pikepdf.Name("/ExtGState"),
+            OP=True,
+            op=True,
+            OPM=1,
+        )
+
+        # Spot color layer on top with overprint
+        content_parts.append(
+            f"/GS1 gs\n"
+            f"q\n"
+            f"{width_pt:.4f} 0 0 {height_pt:.4f} 0 0 cm\n"
+            f"/SpotImg Do\n"
+            f"Q\n"
+        )
+
+        page["/Contents"] = pikepdf.Stream(pdf, "".join(content_parts).encode())
+        pdf.save(output_pdf)
+
+    return output_pdf
+
+
+@app.post("/spot-color-layer")
+async def spot_color_layer(
+    file: UploadFile = File(...),
+    spot_name: str = Form("white"),
+    dpi: int = Form(300),
+):
+    try:
+        tmp_path = await _save_upload_tmp(file, ".png")
+        output = _create_spot_color_pdf_from_image(str(tmp_path), spot_name, dpi)
+        return FileResponse(path=str(output), media_type="application/pdf", filename="spot-color-layer.pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/image-with-spot-color")
+async def image_with_spot_color(
+    file: UploadFile = File(...),
+    spot_name: str = Form("white"),
+    dpi: int = Form(300),
+):
+    try:
+        tmp_path = await _save_upload_tmp(file, ".png")
+        output = _create_spot_color_pdf_from_image(str(tmp_path), spot_name, dpi, include_image=True)
+        return FileResponse(path=str(output), media_type="application/pdf", filename="image-with-spot-color.pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/debug")
+async def debug_pdf(file: UploadFile = File(...), dpi: int = Form(150)):
+    try:
+        tmp_path = await _save_upload_tmp(file, ".pdf")
+        result = {"spot_colors": [], "pages": [], "images": [], "previews": {}}
+
+        # Extract spot colors via mutool
+        grep_result = subprocess.run(
+            ["mutool", "show", str(tmp_path), "grep"],
+            capture_output=True, text=True
+        )
+        for line in grep_result.stdout.splitlines():
+            if "/Separation" in line:
+                for match in re.finditer(r'/Separation/([A-Za-z0-9_-]+)', line):
+                    name = match.group(1)
+                    if name not in result["spot_colors"]:
+                        result["spot_colors"].append(name)
+
+        # Page info via mutool
+        pages_result = subprocess.run(
+            ["mutool", "show", str(tmp_path), "pages"],
+            capture_output=True, text=True
+        )
+        result["pages_raw"] = pages_result.stdout.strip()
+
+        # Image info via mutool info
+        info_result = subprocess.run(
+            ["mutool", "info", str(tmp_path)],
+            capture_output=True, text=True
+        )
+        for line in info_result.stdout.splitlines():
+            line = line.strip()
+            if line and ("bpc" in line or "Image" in line):
+                result["images"].append(line)
+
+        # Overprint info via pikepdf
+        try:
+            with pikepdf.open(str(tmp_path)) as pdf:
+                for page_idx, page in enumerate(pdf.pages):
+                    page_info = {"page": page_idx + 1}
+                    mb = page.get("/MediaBox")
+                    if mb:
+                        page_info["mediabox"] = [float(v) for v in mb]
+                        w_pt, h_pt = float(mb[2]) - float(mb[0]), float(mb[3]) - float(mb[1])
+                        page_info["size_mm"] = [round(w_pt / 72 * 25.4, 1), round(h_pt / 72 * 25.4, 1)]
+                    res = page.get("/Resources", {})
+                    gs = res.get("/ExtGState", {})
+                    overprint_states = {}
+                    for gs_name, gs_obj in gs.items():
+                        op = gs_obj.get("/OP")
+                        if op is not None:
+                            overprint_states[str(gs_name)] = {
+                                "OP": bool(op), "op": bool(gs_obj.get("/op", False)),
+                                "OPM": int(gs_obj.get("/OPM", 0))
+                            }
+                    if overprint_states:
+                        page_info["overprint"] = overprint_states
+                    result["pages"].append(page_info)
+        except Exception as e:
+            result["pikepdf_error"] = str(e)
+
+        # Render previews with mutool draw
+        preview_dir = TMP_DIR / f"debug-{uuid.uuid4().hex}"
+        preview_dir.mkdir(exist_ok=True)
+        modes = {"no_spot": "0", "overprint": "1", "spot": "2"}
+        for label, mode in modes.items():
+            out_pattern = str(preview_dir / f"{label}_p%d.png")
+            subprocess.run(
+                ["mutool", "draw", "-r", str(dpi), "-c", "rgb", "-O", mode,
+                 "-o", out_pattern, str(tmp_path)],
+                capture_output=True, text=True
+            )
+            # Collect rendered pages
+            pages_b64 = []
+            for png in sorted(preview_dir.glob(f"{label}_p*.png")):
+                with open(png, "rb") as f:
+                    pages_b64.append(base64.b64encode(f.read()).decode())
+            result["previews"][label] = pages_b64
+
+        # Ink analysis: detect non-white pixels in transparent areas of base image
+        result["ink_analysis"] = None
+        try:
+            with pikepdf.open(str(tmp_path)) as pdf:
+                page = pdf.pages[0]
+                res = page.get("/Resources", {})
+                xobjects = res.get("/XObject", {})
+
+                # Also check inside Form XObjects (TPL0 wrappers)
+                def find_images(xobjs):
+                    base_img = None
+                    spot_img = None
+                    for name, obj in xobjs.items():
+                        subtype = str(obj.get("/Subtype", ""))
+                        if subtype == "/Form" and "/Resources" in obj:
+                            nested = obj["/Resources"].get("/XObject", {})
+                            b, s = find_images(nested)
+                            if b: base_img = b
+                            if s: spot_img = s
+                        elif subtype == "/Image":
+                            cs = str(obj.get("/ColorSpace", ""))
+                            if "/Separation" in cs:
+                                spot_img = obj
+                            elif "/DeviceCMYK" in cs or "/DeviceRGB" in cs:
+                                base_img = obj
+                    return base_img, spot_img
+
+                base_obj, spot_obj = find_images(xobjects)
+
+                if base_obj is not None and spot_obj is not None:
+                    base_w = int(base_obj["/Width"])
+                    base_h = int(base_obj["/Height"])
+                    spot_w = int(spot_obj["/Width"])
+                    spot_h = int(spot_obj["/Height"])
+
+                    base_cs = str(base_obj.get("/ColorSpace", ""))
+                    has_smask = "/SMask" in base_obj
+                    if "/DeviceCMYK" in base_cs:
+                        channels = 4
+                        mode = "CMYK"
+                    else:
+                        channels = 3
+                        mode = "RGB"
+
+                    # Extract image data, handling JPEG (DCTDecode) streams
+                    def extract_image_data(obj, expected_channels):
+                        filters = str(obj.get("/Filter", ""))
+                        if "/DCTDecode" in filters:
+                            raw = obj.read_raw_bytes()
+                            pil_img = Image.open(io.BytesIO(raw))
+                            return np.array(pil_img)
+                        else:
+                            data = obj.read_bytes()
+                            w = int(obj["/Width"])
+                            h = int(obj["/Height"])
+                            if len(data) == w * h * expected_channels:
+                                return np.frombuffer(data, dtype=np.uint8).reshape(h, w, expected_channels)
+                            elif len(data) == w * h:
+                                return np.frombuffer(data, dtype=np.uint8).reshape(h, w)
+                            return None
+
+                    base_arr = extract_image_data(base_obj, channels)
+                    spot_arr = extract_image_data(spot_obj, 1)
+
+                    # Extract SMask if present
+                    smask_arr = None
+                    if has_smask:
+                        smask_obj = base_obj["/SMask"]
+                        smask_arr = extract_image_data(smask_obj, 1)
+                        if smask_arr is not None and len(smask_arr.shape) == 3:
+                            smask_arr = smask_arr.squeeze(axis=2)
+
+                    if base_arr is not None and spot_arr is not None:
+                        if len(spot_arr.shape) == 2:
+                            pass  # already (h, w)
+                        elif spot_arr.shape[2] == 1:
+                            spot_arr = spot_arr.squeeze(axis=2)
+                        # Resize spot to match base if needed
+                        if (spot_h, spot_w) != (base_h, base_w):
+                            spot_pil = Image.fromarray(spot_arr, "L").resize((base_w, base_h), Image.NEAREST)
+                            spot_arr = np.array(spot_pil)
+
+                        # Transparent mask: where spot alpha is 0
+                        transparent_mask = spot_arr == 0
+
+                        if mode == "CMYK":
+                            # Any CMYK channel > 0 in transparent area = ink where there shouldn't be
+                            ink_sum = base_arr.sum(axis=2)
+                        else:
+                            # RGB: non-white means ink (255,255,255 = white = no ink)
+                            ink_sum = (255 * channels) - base_arr.sum(axis=2).astype(np.int32)
+                            ink_sum = np.clip(ink_sum, 0, 255 * channels)
+
+                        # If SMask exists, pixels masked out (alpha=0) are safe regardless of pixel data
+                        if smask_arr is not None:
+                            if (smask_arr.shape[0], smask_arr.shape[1]) != (base_arr.shape[0], base_arr.shape[1]):
+                                smask_pil = Image.fromarray(smask_arr, "L").resize((base_arr.shape[1], base_arr.shape[0]), Image.NEAREST)
+                                smask_arr = np.array(smask_pil)
+                            masked_out = smask_arr == 0
+                            ink_sum[masked_out] = 0  # SMask hides these pixels, no ink problem
+
+                        bad_pixels = transparent_mask & (ink_sum > 0)
+                        total_transparent = int(transparent_mask.sum())
+                        total_bad = int(bad_pixels.sum())
+
+                        analysis = {
+                            "base_colorspace": mode,
+                            "base_has_smask": has_smask,
+                            "base_size": f"{base_w}x{base_h}",
+                            "spot_size": f"{spot_w}x{spot_h}",
+                            "transparent_pixels": total_transparent,
+                            "ink_in_transparent": total_bad,
+                            "has_problem": total_bad > 0,
+                        }
+                        if total_transparent > 0:
+                            analysis["percent_bad"] = round(total_bad / total_transparent * 100, 1)
+
+                        # Generate heatmap visualization
+                        heatmap = np.zeros((base_h, base_w, 3), dtype=np.uint8)
+                        heatmap[:] = [32, 32, 32]  # dark gray bg
+
+                        # Show spot coverage in blue
+                        spot_visible = spot_arr > 0
+                        heatmap[spot_visible] = [40, 40, 80]
+
+                        # Show bad pixels in red, intensity = ink amount
+                        if total_bad > 0:
+                            bad_intensity = np.clip(ink_sum, 0, 255).astype(np.uint8)
+                            heatmap[bad_pixels, 0] = np.clip(bad_intensity[bad_pixels] + 50, 0, 255)
+                            heatmap[bad_pixels, 1] = 0
+                            heatmap[bad_pixels, 2] = 0
+
+                        # Show clean transparent in green
+                        clean = transparent_mask & ~bad_pixels
+                        heatmap[clean] = [0, 60, 0]
+
+                        heatmap_img = Image.fromarray(heatmap, "RGB")
+                        # Downscale for transfer
+                        max_dim = 800
+                        if max(base_w, base_h) > max_dim:
+                            ratio = max_dim / max(base_w, base_h)
+                            heatmap_img = heatmap_img.resize(
+                                (int(base_w * ratio), int(base_h * ratio)), Image.NEAREST
+                            )
+
+                        buf = io.BytesIO()
+                        heatmap_img.save(buf, format="PNG")
+                        analysis["heatmap"] = base64.b64encode(buf.getvalue()).decode()
+
+                        result["ink_analysis"] = analysis
+        except Exception as e:
+            result["ink_analysis_error"] = str(e)
+
+        return JSONResponse(content=result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/debug")
+async def debug_page():
+    return HTMLResponse(content=DEBUG_HTML)
+
+
+DEBUG_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF Spot Color Debugger</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #111; color: #eee; padding: 20px; }
+  h1 { font-size: 1.4em; margin-bottom: 16px; }
+  h2 { font-size: 1.1em; margin: 16px 0 8px; color: #aaa; }
+  .upload-area { border: 2px dashed #444; border-radius: 8px; padding: 40px; text-align: center; cursor: pointer; margin-bottom: 20px; transition: border-color 0.2s; }
+  .upload-area:hover, .upload-area.dragover { border-color: #888; }
+  .upload-area input { display: none; }
+  .info { background: #1a1a1a; border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; }
+  .info pre { white-space: pre-wrap; font-size: 13px; color: #ccc; }
+  .spot-tags { display: flex; gap: 8px; flex-wrap: wrap; }
+  .spot-tag { background: #2a2a2a; border: 1px solid #444; border-radius: 4px; padding: 4px 12px; font-family: monospace; }
+  .previews { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 12px; }
+  .preview-col { text-align: center; }
+  .preview-col img { width: 100%; border-radius: 4px; background: #222; }
+  .preview-col .label { font-size: 12px; color: #888; margin-bottom: 4px; }
+  .loading { display: none; text-align: center; padding: 40px; color: #888; }
+  .loading.active { display: block; }
+  .results { display: none; }
+  .results.active { display: block; }
+  .page-section { margin-bottom: 24px; padding-bottom: 24px; border-bottom: 1px solid #222; }
+</style>
+</head>
+<body>
+<h1>PDF Spot Color Debugger</h1>
+
+<div class="upload-area" id="dropzone">
+  <p>Drop a PDF here or click to upload</p>
+  <input type="file" id="fileInput" accept=".pdf">
+</div>
+
+<div class="loading" id="loading">Analyzing PDF...</div>
+
+<div class="results" id="results">
+  <h2>Spot Colors</h2>
+  <div class="info" id="spotColors"></div>
+
+  <h2>Pages</h2>
+  <div class="info" id="pageInfo"></div>
+
+  <h2>Images</h2>
+  <div class="info" id="imageInfo"></div>
+
+  <h2>Ink Analysis</h2>
+  <div class="info" id="inkAnalysis"></div>
+  <div id="heatmapContainer" style="margin-bottom:16px;"></div>
+
+  <h2>Previews</h2>
+  <div id="previewContainer"></div>
+</div>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const loading = document.getElementById('loading');
+const results = document.getElementById('results');
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', e => { e.preventDefault(); dropzone.classList.remove('dragover'); handleFile(e.dataTransfer.files[0]); });
+fileInput.addEventListener('change', () => handleFile(fileInput.files[0]));
+
+async function handleFile(file) {
+  if (!file) return;
+  loading.classList.add('active');
+  results.classList.remove('active');
+
+  const form = new FormData();
+  form.append('file', file);
+  form.append('dpi', '150');
+
+  try {
+    const resp = await fetch('/debug', { method: 'POST', body: form });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.detail || 'Error');
+    renderResults(data);
+  } catch (e) {
+    alert('Error: ' + e.message);
+  } finally {
+    loading.classList.remove('active');
+  }
+}
+
+function renderResults(data) {
+  // Spot colors
+  const sc = document.getElementById('spotColors');
+  if (data.spot_colors.length === 0) {
+    sc.innerHTML = '<pre>No spot colors found</pre>';
+  } else {
+    sc.innerHTML = '<div class="spot-tags">' + data.spot_colors.map(s => '<span class="spot-tag">' + s + '</span>').join('') + '</div>';
+  }
+
+  // Pages
+  const pi = document.getElementById('pageInfo');
+  let pageHtml = '';
+  for (const p of data.pages) {
+    pageHtml += 'Page ' + p.page;
+    if (p.size_mm) pageHtml += ' &mdash; ' + p.size_mm[0] + ' x ' + p.size_mm[1] + ' mm';
+    if (p.overprint) {
+      for (const [gs, vals] of Object.entries(p.overprint)) {
+        pageHtml += '\\n  ' + gs + ': OP=' + vals.OP + ', op=' + vals.op + ', OPM=' + vals.OPM;
+      }
+    }
+    pageHtml += '\\n';
+  }
+  pi.innerHTML = '<pre>' + pageHtml + '</pre>';
+
+  // Images
+  const ii = document.getElementById('imageInfo');
+  ii.innerHTML = '<pre>' + (data.images.length ? data.images.join('\\n') : 'No images found') + '</pre>';
+
+  // Previews
+  const pc = document.getElementById('previewContainer');
+  const pageCount = data.previews.no_spot ? data.previews.no_spot.length : 0;
+  let html = '';
+  for (let i = 0; i < pageCount; i++) {
+    html += '<div class="page-section"><p style="color:#888;margin-bottom:8px;">Page ' + (i + 1) + '</p><div class="previews">';
+    for (const [mode, label] of [['no_spot', 'No Spot (O0)'], ['overprint', 'Overprint Sim (O1)'], ['spot', 'Spot Render (O2)']]) {
+      const b64 = data.previews[mode] && data.previews[mode][i];
+      html += '<div class="preview-col"><div class="label">' + label + '</div>';
+      if (b64) html += '<img src="data:image/png;base64,' + b64 + '">';
+      else html += '<p style="color:#666">N/A</p>';
+      html += '</div>';
+    }
+    html += '</div></div>';
+  }
+  pc.innerHTML = html;
+
+  // Ink analysis
+  const ia = document.getElementById('inkAnalysis');
+  const hc = document.getElementById('heatmapContainer');
+  if (data.ink_analysis) {
+    const a = data.ink_analysis;
+    let status = a.has_problem
+      ? '<span style="color:#f44">PROBLEM: ' + a.ink_in_transparent.toLocaleString() + ' pixels have ink in transparent areas (' + a.percent_bad + '%)</span>'
+      : '<span style="color:#4f4">OK: No ink in transparent areas</span>';
+    ia.innerHTML = '<pre>' + status + '\\n\\nBase image: ' + a.base_size + ' ' + a.base_colorspace
+      + '\\nSpot image: ' + a.spot_size
+      + '\\nTransparent pixels: ' + a.transparent_pixels.toLocaleString()
+      + '\\nInk in transparent: ' + a.ink_in_transparent.toLocaleString()
+      + '</pre>';
+    if (a.heatmap) {
+      hc.innerHTML = '<p style="color:#888;font-size:12px;margin-bottom:4px;">Heatmap: <span style="color:#4f4">green</span> = clean transparent, <span style="color:#f44">red</span> = ink in transparent area, <span style="color:#448">blue</span> = spot coverage</p>'
+        + '<img src="data:image/png;base64,' + a.heatmap + '" style="max-width:100%;border-radius:4px;">';
+    }
+  } else if (data.ink_analysis_error) {
+    ia.innerHTML = '<pre style="color:#fa0">Error: ' + data.ink_analysis_error + '</pre>';
+  } else {
+    ia.innerHTML = '<pre style="color:#888">No base + spot image pair found to analyze</pre>';
+  }
+
+  results.classList.add('active');
+}
+</script>
+</body>
+</html>
+"""
+
+
 @app.get("/optimize-starringyou/{poster_id}")
 async def optimize_starringyou_poster(poster_id: str):
     pdf_url = f"https://starringyou-rendering.vandalen.workers.dev/?posterId={poster_id}"
     return await flatten(FlattenRequest(input_pdf=pdf_url, dpi=300))
+
+
+@app.get("/optimize-starringyou-gs/{poster_id}")
+async def optimize_starringyou_gs_poster(poster_id: str):
+    try:
+        pdf_url = f"https://starringyou-rendering.vandalen.workers.dev/?posterId={poster_id}"
+        input_path = _resolve_input_path(pdf_url, ".pdf")
+        output_path = TMP_DIR / f"optimized-{uuid.uuid4().hex}.pdf"
+        result = subprocess.run([
+            "gs", "-dNOPAUSE", "-dBATCH", "-dSAFER",
+            "-sDEVICE=pdfwrite",
+            "-dCompatibilityLevel=1.4",
+            "-dPDFSETTINGS=/prepress",
+            "-dDetectDuplicateImages=true",
+            "-dCompressFonts=true",
+            f"-sOutputFile={output_path}",
+            str(input_path),
+        ], capture_output=True, text=True)
+        if result.returncode != 0:
+            return JSONResponse(status_code=500, content={
+                "step": "ghostscript-optimize",
+                "error": "Ghostscript optimization failed",
+                "stderr": result.stderr,
+                "stdout": result.stdout,
+            })
+        return FileResponse(path=str(output_path), media_type="application/pdf", filename="optimized.pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
