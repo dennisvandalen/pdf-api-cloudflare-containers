@@ -1085,12 +1085,17 @@ async def quick_preview_upload(file: UploadFile = File(...), page: int = Form(0)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _create_spot_color_pdf_from_image(image_path: str, spot_name: str, dpi: int, include_image: bool = False) -> Path:
-    """Create a PDF with a Separation (spot) color layer from an image's alpha channel.
+def _create_spot_color_pdf_from_image(
+    image_path: str,
+    spot_name: str,
+    dpi: int,
+    include_image: bool = False,
+    include_spot: bool = True,
+) -> Path:
+    """Create a PDF with optional RGB base image and/or a Separation (spot) color layer.
 
-    Every non-transparent pixel becomes a spot-color pixel; the alpha value
-    controls the tint (255 = full tint, 0 = no ink).
-    If include_image is True, the original image is drawn as CMYK underneath.
+    - include_image: draw the original image as RGB with SMask for transparency
+    - include_spot: draw a spot color layer where non-transparent pixels become spot ink
     """
     img = Image.open(image_path).convert("RGBA")
     alpha = img.split()[3]  # 0 = transparent, 255 = opaque
@@ -1111,8 +1116,43 @@ def _create_spot_color_pdf_from_image(image_path: str, spot_name: str, dpi: int,
         page["/Resources"] = pikepdf.Dictionary()
 
         resources = page["/Resources"]
-        resources["/ColorSpace"] = pikepdf.Dictionary()
         resources["/XObject"] = pikepdf.Dictionary()
+        resources["/Properties"] = pikepdf.Dictionary()
+
+        # OCG (Optional Content Group) for spot color layer
+        spot_ocg = None
+        base_ocg = None
+        ocgs_list = []
+        if include_spot:
+            spot_ocg = pdf.make_indirect(pikepdf.Dictionary(
+                Type=pikepdf.Name("/OCG"),
+                Name=spot_name,
+                Usage=pikepdf.Dictionary(
+                    Print=pikepdf.Dictionary(
+                        Subtype=pikepdf.Name("/Print"),
+                        PrintState=pikepdf.Name("/ON"),
+                    ),
+                ),
+            ))
+            resources["/Properties"]["/SpotOC"] = spot_ocg
+            ocgs_list.append(spot_ocg)
+        if include_image:
+            base_ocg = pdf.make_indirect(pikepdf.Dictionary(
+                Type=pikepdf.Name("/OCG"),
+                Name="Image",
+            ))
+            resources["/Properties"]["/BaseOC"] = base_ocg
+            ocgs_list.append(base_ocg)
+
+        if ocgs_list:
+            pdf.Root["/OCProperties"] = pikepdf.Dictionary(
+                OCGs=pikepdf.Array(ocgs_list),
+                D=pikepdf.Dictionary(
+                    Order=pikepdf.Array(ocgs_list),
+                    ON=pikepdf.Array(ocgs_list),
+                    OFF=pikepdf.Array([]),
+                ),
+            )
 
         content_parts = []
 
@@ -1143,61 +1183,63 @@ def _create_spot_color_pdf_from_image(image_path: str, spot_name: str, dpi: int,
             resources["/XObject"]["/BaseImg"] = base_stream
 
             content_parts.append(
+                f"/OC /BaseOC BDC\n"
                 f"q\n"
                 f"{width_pt:.4f} 0 0 {height_pt:.4f} 0 0 cm\n"
                 f"/BaseImg Do\n"
                 f"Q\n"
+                f"EMC\n"
             )
 
-        # Separation color space
-        tint_transform = pikepdf.Dictionary(
-            FunctionType=2,
-            Domain=[0, 1],
-            C0=[0, 0, 0, 0],
-            C1=[0, 0.9, 0, 0],
-            N=1,
-        )
-        resources["/ColorSpace"]["/SpotCS"] = pikepdf.Array([
-            pikepdf.Name("/Separation"),
-            pikepdf.Name(f"/{spot_name}"),
-            pikepdf.Name("/DeviceCMYK"),
-            tint_transform,
-        ])
+        if include_spot:
+            resources["/ColorSpace"] = pikepdf.Dictionary()
+            tint_transform = pikepdf.Dictionary(
+                FunctionType=2,
+                Domain=[0, 1],
+                C0=[0, 0, 0, 0],
+                C1=[0, 0.9, 0, 0],
+                N=1,
+            )
+            resources["/ColorSpace"]["/SpotCS"] = pikepdf.Array([
+                pikepdf.Name("/Separation"),
+                pikepdf.Name(f"/{spot_name}"),
+                pikepdf.Name("/DeviceCMYK"),
+                tint_transform,
+            ])
 
-        # Image XObject using the Separation color space
-        compressed = zlib.compress(alpha_bytes)
-        img_stream = pikepdf.Stream(pdf, compressed)
-        img_stream["/Type"] = pikepdf.Name("/XObject")
-        img_stream["/Subtype"] = pikepdf.Name("/Image")
-        img_stream["/Width"] = width_px
-        img_stream["/Height"] = height_px
-        img_stream["/ColorSpace"] = pikepdf.Array([
-            pikepdf.Name("/Separation"),
-            pikepdf.Name(f"/{spot_name}"),
-            pikepdf.Name("/DeviceCMYK"),
-            tint_transform,
-        ])
-        img_stream["/BitsPerComponent"] = 8
-        img_stream["/Filter"] = pikepdf.Name("/FlateDecode")
-        resources["/XObject"]["/SpotImg"] = img_stream
+            compressed = zlib.compress(alpha_bytes)
+            img_stream = pikepdf.Stream(pdf, compressed)
+            img_stream["/Type"] = pikepdf.Name("/XObject")
+            img_stream["/Subtype"] = pikepdf.Name("/Image")
+            img_stream["/Width"] = width_px
+            img_stream["/Height"] = height_px
+            img_stream["/ColorSpace"] = pikepdf.Array([
+                pikepdf.Name("/Separation"),
+                pikepdf.Name(f"/{spot_name}"),
+                pikepdf.Name("/DeviceCMYK"),
+                tint_transform,
+            ])
+            img_stream["/BitsPerComponent"] = 8
+            img_stream["/Filter"] = pikepdf.Name("/FlateDecode")
+            resources["/XObject"]["/SpotImg"] = img_stream
 
-        # ExtGState with overprint enabled
-        resources["/ExtGState"] = pikepdf.Dictionary()
-        resources["/ExtGState"]["/GS1"] = pikepdf.Dictionary(
-            Type=pikepdf.Name("/ExtGState"),
-            OP=True,
-            op=True,
-            OPM=1,
-        )
+            resources["/ExtGState"] = pikepdf.Dictionary()
+            resources["/ExtGState"]["/GS1"] = pikepdf.Dictionary(
+                Type=pikepdf.Name("/ExtGState"),
+                OP=True,
+                op=True,
+                OPM=1,
+            )
 
-        # Spot color layer on top with overprint
-        content_parts.append(
-            f"/GS1 gs\n"
-            f"q\n"
-            f"{width_pt:.4f} 0 0 {height_pt:.4f} 0 0 cm\n"
-            f"/SpotImg Do\n"
-            f"Q\n"
-        )
+            content_parts.append(
+                f"/OC /SpotOC BDC\n"
+                f"/GS1 gs\n"
+                f"q\n"
+                f"{width_pt:.4f} 0 0 {height_pt:.4f} 0 0 cm\n"
+                f"/SpotImg Do\n"
+                f"Q\n"
+                f"EMC\n"
+            )
 
         page["/Contents"] = pikepdf.Stream(pdf, "".join(content_parts).encode())
         pdf.save(output_pdf)
@@ -1213,8 +1255,21 @@ async def spot_color_layer(
 ):
     try:
         tmp_path = await _save_upload_tmp(file, ".png")
-        output = _create_spot_color_pdf_from_image(str(tmp_path), spot_name, dpi)
+        output = _create_spot_color_pdf_from_image(str(tmp_path), spot_name, dpi, include_image=False, include_spot=True)
         return FileResponse(path=str(output), media_type="application/pdf", filename="spot-color-layer.pdf")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/image-only")
+async def image_only(
+    file: UploadFile = File(...),
+    dpi: int = Form(300),
+):
+    try:
+        tmp_path = await _save_upload_tmp(file, ".png")
+        output = _create_spot_color_pdf_from_image(str(tmp_path), "white", dpi, include_image=True, include_spot=False)
+        return FileResponse(path=str(output), media_type="application/pdf", filename="image-only.pdf")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -1227,7 +1282,7 @@ async def image_with_spot_color(
 ):
     try:
         tmp_path = await _save_upload_tmp(file, ".png")
-        output = _create_spot_color_pdf_from_image(str(tmp_path), spot_name, dpi, include_image=True)
+        output = _create_spot_color_pdf_from_image(str(tmp_path), spot_name, dpi, include_image=True, include_spot=True)
         return FileResponse(path=str(output), media_type="application/pdf", filename="image-with-spot-color.pdf")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1294,23 +1349,47 @@ async def debug_pdf(file: UploadFile = File(...), dpi: int = Form(150)):
         except Exception as e:
             result["pikepdf_error"] = str(e)
 
-        # Render previews with mutool draw
+        # Render previews with Ghostscript
         preview_dir = TMP_DIR / f"debug-{uuid.uuid4().hex}"
         preview_dir.mkdir(exist_ok=True)
-        modes = {"no_spot": "0", "overprint": "1", "spot": "2"}
-        for label, mode in modes.items():
-            out_pattern = str(preview_dir / f"{label}_p%d.png")
-            subprocess.run(
-                ["mutool", "draw", "-r", str(dpi), "-c", "rgb", "-O", mode,
-                 "-o", out_pattern, str(tmp_path)],
-                capture_output=True, text=True
-            )
-            # Collect rendered pages
-            pages_b64 = []
-            for png in sorted(preview_dir.glob(f"{label}_p*.png")):
-                with open(png, "rb") as f:
-                    pages_b64.append(base64.b64encode(f.read()).decode())
-            result["previews"][label] = pages_b64
+
+        # No-overprint preview (png16m)
+        no_op_pattern = str(preview_dir / "no_overprint_p%d.png")
+        subprocess.run(
+            ["gs", "-dNOPAUSE", "-dBATCH", "-dQUIET", "-dSAFER",
+             "-sDEVICE=png16m", f"-r{dpi}",
+             f"-o{no_op_pattern}", str(tmp_path)],
+            capture_output=True, text=True
+        )
+        pages_b64 = []
+        for png in sorted(preview_dir.glob("no_overprint_p*.png")):
+            with open(png, "rb") as f:
+                pages_b64.append(base64.b64encode(f.read()).decode())
+        result["previews"]["no_overprint"] = pages_b64
+
+        # Overprint preview via tiffsep composite (works regardless of OCGs)
+        sep_pattern = str(preview_dir / "sep_p%d.tif")
+        subprocess.run(
+            ["gs", "-dNOPAUSE", "-dBATCH", "-dQUIET", "-dSAFER",
+             "-sDEVICE=tiffsep", f"-r{dpi}",
+             f"-o{sep_pattern}", str(tmp_path)],
+            capture_output=True, text=True
+        )
+        pages_b64 = []
+        # The composite TIFF has the page index suffix without the channel name
+        composite_files = sorted([
+            p for p in preview_dir.glob("sep_p*.tif")
+            if "(" not in p.name
+        ])
+        for tif in composite_files:
+            try:
+                pil_img = Image.open(str(tif))
+                buf = io.BytesIO()
+                pil_img.convert("RGB").save(buf, format="PNG")
+                pages_b64.append(base64.b64encode(buf.getvalue()).decode())
+            except Exception:
+                pass
+        result["previews"]["overprint"] = pages_b64
 
         # Ink analysis: detect non-white pixels in transparent areas of base image
         result["ink_analysis"] = None
@@ -1428,6 +1507,30 @@ async def debug_pdf(file: UploadFile = File(...), dpi: int = Form(150)):
                         }
                         if total_transparent > 0:
                             analysis["percent_bad"] = round(total_bad / total_transparent * 100, 1)
+
+                        # Base image preview (with SMask applied if present)
+                        try:
+                            if mode == "CMYK":
+                                base_pil = Image.fromarray(base_arr, "CMYK").convert("RGB")
+                            else:
+                                base_pil = Image.fromarray(base_arr, "RGB")
+                            if smask_arr is not None:
+                                alpha_pil = Image.fromarray(smask_arr, "L")
+                                base_rgba = base_pil.convert("RGBA")
+                                base_rgba.putalpha(alpha_pil)
+                                base_pil = base_rgba
+                            max_dim = 800
+                            if max(base_pil.size) > max_dim:
+                                ratio = max_dim / max(base_pil.size)
+                                base_pil = base_pil.resize(
+                                    (int(base_pil.size[0] * ratio), int(base_pil.size[1] * ratio)),
+                                    Image.LANCZOS,
+                                )
+                            buf_base = io.BytesIO()
+                            base_pil.save(buf_base, format="PNG")
+                            analysis["base_preview"] = base64.b64encode(buf_base.getvalue()).decode()
+                        except Exception:
+                            pass
 
                         # Generate heatmap visualization
                         heatmap = np.zeros((base_h, base_w, 3), dtype=np.uint8)
@@ -1595,11 +1698,11 @@ function renderResults(data) {
 
   // Previews
   const pc = document.getElementById('previewContainer');
-  const pageCount = data.previews.no_spot ? data.previews.no_spot.length : 0;
+  const pageCount = data.previews.no_overprint ? data.previews.no_overprint.length : 0;
   let html = '';
   for (let i = 0; i < pageCount; i++) {
-    html += '<div class="page-section"><p style="color:#888;margin-bottom:8px;">Page ' + (i + 1) + '</p><div class="previews">';
-    for (const [mode, label] of [['no_spot', 'No Spot (O0)'], ['overprint', 'Overprint Sim (O1)'], ['spot', 'Spot Render (O2)']]) {
+    html += '<div class="page-section"><p style="color:#888;margin-bottom:8px;">Page ' + (i + 1) + '</p><div class="previews" style="grid-template-columns:repeat(2,1fr);">';
+    for (const [mode, label] of [['no_overprint', 'No Overprint'], ['overprint', 'Overprint Simulated']]) {
       const b64 = data.previews[mode] && data.previews[mode][i];
       html += '<div class="preview-col"><div class="label">' + label + '</div>';
       if (b64) html += '<img src="data:image/png;base64,' + b64 + '">';
@@ -1623,10 +1726,16 @@ function renderResults(data) {
       + '\\nTransparent pixels: ' + a.transparent_pixels.toLocaleString()
       + '\\nInk in transparent: ' + a.ink_in_transparent.toLocaleString()
       + '</pre>';
+    let hcHtml = '';
+    if (a.base_preview) {
+      hcHtml += '<p style="color:#888;font-size:12px;margin:12px 0 4px;">Base image only (spot color hidden) &mdash; what prints <em>under</em> the spot layer:</p>'
+        + '<img src="data:image/png;base64,' + a.base_preview + '" style="max-width:100%;border-radius:4px;background:repeating-conic-gradient(#222 0% 25%,#333 0% 50%) 50%/20px 20px;">';
+    }
     if (a.heatmap) {
-      hc.innerHTML = '<p style="color:#888;font-size:12px;margin-bottom:4px;">Heatmap: <span style="color:#4f4">green</span> = clean transparent, <span style="color:#f44">red</span> = ink in transparent area, <span style="color:#448">blue</span> = spot coverage</p>'
+      hcHtml += '<p style="color:#888;font-size:12px;margin:12px 0 4px;">Heatmap: <span style="color:#4f4">green</span> = clean transparent, <span style="color:#f44">red</span> = ink in transparent area, <span style="color:#448">blue</span> = spot coverage</p>'
         + '<img src="data:image/png;base64,' + a.heatmap + '" style="max-width:100%;border-radius:4px;">';
     }
+    hc.innerHTML = hcHtml;
   } else if (data.ink_analysis_error) {
     ia.innerHTML = '<pre style="color:#fa0">Error: ' + data.ink_analysis_error + '</pre>';
   } else {

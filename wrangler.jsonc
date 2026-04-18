@@ -45,7 +45,7 @@
 	// "services": [{ "binding": "MY_SERVICE", "service": "my-service" }]
 	"containers": [
 		{
-			"instance_type": "standard-4",
+			"instance_type": "standard-1",
 			"class_name": "MyContainer",
 			"image": "./Dockerfile",
 			"max_instances": 5

@@ -232,6 +232,19 @@ app.post("/debug", async (c) => {
   return await container.fetch(req);
 });
 
+// Proxy POST /image-only
+app.post("/image-only", async (c) => {
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL("/image-only", "http://container"), {
+    method: "POST",
+    headers: c.req.raw.headers,
+    body: c.req.raw.body,
+  });
+  return await container.fetch(req);
+});
+
 // Proxy POST /spot-color-layer
 app.post("/spot-color-layer", async (c) => {
   const container = c.env.PDF_API.get(
