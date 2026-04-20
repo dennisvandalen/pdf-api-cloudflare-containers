@@ -211,6 +211,19 @@ app.post("/quick-preview/upload", async (c) => {
   return await container.fetch(req);
 });
 
+// Proxy POST /v1/print/white-ink
+app.post("/v1/print/white-ink", async (c) => {
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL("/v1/print/white-ink", "http://container"), {
+    method: "POST",
+    headers: c.req.raw.headers,
+    body: c.req.raw.body,
+  });
+  return await container.fetch(req);
+});
+
 // Proxy GET/POST /debug
 app.get("/debug", async (c) => {
   const container = c.env.PDF_API.get(

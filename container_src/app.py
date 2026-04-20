@@ -1288,6 +1288,46 @@ async def image_with_spot_color(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/v1/print/white-ink")
+async def v1_print_white_ink(
+    image: UploadFile = File(..., description="PNG image with alpha channel"),
+    include_image: bool = Form(True, description="Include the base RGB image below the white ink layer"),
+    spot_name: str = Form("white", description="Name of the spot color separation"),
+    dpi: int = Form(300, description="Output PDF resolution"),
+):
+    """Generate a print-ready PDF with a white ink spot color layer.
+
+    Every non-transparent pixel in the input image becomes white ink; alpha
+    controls the tint (255 = full ink, 0 = none). Overprint is enabled so the
+    white ink composites correctly on top of the base image or any underlying
+    content in downstream processing.
+
+    By default the base RGB image is included underneath the white ink layer,
+    which is the typical print production setup. Set include_image=false to
+    output only the spot color layer.
+    """
+    try:
+        tmp_path = await _save_upload_tmp(image, ".png")
+        output = _create_spot_color_pdf_from_image(
+            str(tmp_path),
+            spot_name=spot_name,
+            dpi=dpi,
+            include_image=include_image,
+            include_spot=True,
+        )
+        return FileResponse(
+            path=str(output),
+            media_type="application/pdf",
+            filename="white-ink.pdf",
+            headers={
+                "X-Spot-Name": spot_name,
+                "X-Includes-Base-Image": str(include_image).lower(),
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/debug")
 async def debug_pdf(file: UploadFile = File(...), dpi: int = Form(150)):
     try:
