@@ -22,7 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
   && rm -rf /var/lib/apt/lists/*
 
-# Build Ghostscript 9.55.0 from source (GS 10's new PDF interpreter drops vector elements)
+# Build Ghostscript 9.55.0 from source — GS 10's new PDF interpreter drops
+# vector elements (e.g. star map dots) during pdfwrite at compat 1.4+,
+# and dropping to 1.3 loses spot colors.
 RUN wget -q https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs9550/ghostscript-9.55.0.tar.gz \
   && tar xzf ghostscript-9.55.0.tar.gz \
   && cd ghostscript-9.55.0 \
