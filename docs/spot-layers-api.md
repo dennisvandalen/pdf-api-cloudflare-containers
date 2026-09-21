@@ -10,8 +10,9 @@ the file a printer gets.
 
 ## Request
 
-Multipart, because the files travel as files. Behind a shared secret:
-`Authorization: Bearer <SPOT_LAYERS_SECRET>`.
+Multipart, because the files travel as files. Open: set the worker secret
+`SPOT_LAYERS_SECRET` and it is required as
+`Authorization: Bearer <SPOT_LAYERS_SECRET>` from that moment on.
 
 | Field | Content |
 | --- | --- |
@@ -40,7 +41,6 @@ Multipart, because the files travel as files. Behind a shared secret:
 
 ```
 curl -X POST https://<worker>/v1/print/spot-layers \
-  -H "Authorization: Bearer $SPOT_LAYERS_SECRET" \
   -F 'spec={"page":{"width_mm":297,"height_mm":420},"layers":[{"name":"foil-gold","spot":"Gold","fallback_cmyk":[0,0.2,0.6,0.2]}]}' \
   -F base=@print.png \
   -F layer.foil-gold=@foil-gold.pdf \

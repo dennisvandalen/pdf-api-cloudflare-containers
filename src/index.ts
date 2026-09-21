@@ -214,14 +214,13 @@ app.post("/quick-preview/upload", async (c) => {
 /**
  * The print and its spot layers as one PDF.
  *
- * Behind a shared secret, unlike the endpoints around it: this one takes a
- * whole print file and hands one back, and the workers.dev URL is public.
- * Set it with `wrangler secret put SPOT_LAYERS_SECRET`; without a secret set,
- * the endpoint is closed rather than open.
+ * Open, like the endpoints around it. Set SPOT_LAYERS_SECRET
+ * (`wrangler secret put`) and it is required from that moment on; until then
+ * anyone who knows the URL can post to it.
  */
 app.post("/v1/print/spot-layers", async (c) => {
   const secret = c.env.SPOT_LAYERS_SECRET;
-  if (!secret || c.req.header("Authorization") !== `Bearer ${secret}`) {
+  if (secret && c.req.header("Authorization") !== `Bearer ${secret}`) {
     return c.json({ detail: "unauthorised" }, 401);
   }
 
