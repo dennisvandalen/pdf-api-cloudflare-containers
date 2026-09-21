@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi import UploadFile, File, Form
 from fastapi.responses import FileResponse, JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
@@ -19,7 +19,11 @@ import io
 import uuid
 import zlib
 import base64
+import json
 import os
+import shutil
+
+import spot_layers
 
 app = FastAPI()
 @app.get("/")
@@ -1325,6 +1329,74 @@ async def v1_print_white_ink(
             },
         )
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/v1/print/spot-layers")
+async def v1_print_spot_layers(request: Request):
+    """The print and its finishes as one PDF, each finish a spot colour.
+
+    Multipart, because the files travel as files:
+
+      spec          JSON: {"page": {"width_mm", "height_mm", "bleed_mm"},
+                           "layers": [{"name", "spot", "fallback_cmyk"}],
+                           "output": {"ocg": true}}
+      base          The print, PNG in RGB. Optional: without it the layers
+                    come back on their own, which is what a proof is.
+      layer.{name}  One PDF per layer, as printed by a browser.
+
+    Every paint in a layer becomes tint 1.0 of its separation, overprinting,
+    so the print underneath stays whole. A layer holding a raster image or
+    anything below full opacity is refused: foil is cut from a sheet and
+    pressed on, and neither of those can be made (see spot_layers.py).
+
+    The page is the trimmed size plus bleed, and each layer is placed at the
+    sheet's top-left corner — a browser lays its artwork out from there and
+    rounds its own page up, so the surplus falls off the far edges.
+    """
+    workdir = TMP_DIR / f"spot-layers-{uuid.uuid4().hex}"
+    workdir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        form = await request.form()
+
+        try:
+            spec = json.loads(form.get("spec") or "{}")
+        except json.JSONDecodeError as e:
+            raise spot_layers.Refused(f"the spec is not JSON: {e}")
+
+        base = None
+        files = {}
+
+        for field, value in form.multi_items():
+            if not hasattr(value, "read"):
+                continue
+
+            if field == "base":
+                base = workdir / "base.png"
+            elif field.startswith("layer."):
+                base_name = field[len("layer."):]
+                files[base_name] = workdir / f"layer-{base_name}.pdf"
+            else:
+                continue
+
+            target = base if field == "base" else files[field[len("layer."):]]
+            with open(target, "wb") as f:
+                f.write(await value.read())
+
+        output = spot_layers.build(spec, base, files, workdir / "print.pdf")
+
+        return FileResponse(
+            path=str(output),
+            media_type="application/pdf",
+            filename="print.pdf",
+            headers={"X-Spot-Layers": ",".join(files)},
+        )
+    except spot_layers.Refused as e:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        shutil.rmtree(workdir, ignore_errors=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

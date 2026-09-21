@@ -211,6 +211,31 @@ app.post("/quick-preview/upload", async (c) => {
   return await container.fetch(req);
 });
 
+/**
+ * The print and its spot layers as one PDF.
+ *
+ * Behind a shared secret, unlike the endpoints around it: this one takes a
+ * whole print file and hands one back, and the workers.dev URL is public.
+ * Set it with `wrangler secret put SPOT_LAYERS_SECRET`; without a secret set,
+ * the endpoint is closed rather than open.
+ */
+app.post("/v1/print/spot-layers", async (c) => {
+  const secret = c.env.SPOT_LAYERS_SECRET;
+  if (!secret || c.req.header("Authorization") !== `Bearer ${secret}`) {
+    return c.json({ detail: "unauthorised" }, 401);
+  }
+
+  const container = c.env.PDF_API.get(
+    c.env.PDF_API.idFromName("/pdf-api-singleton"),
+  );
+  const req = new Request(new URL("/v1/print/spot-layers", "http://container"), {
+    method: "POST",
+    headers: c.req.raw.headers,
+    body: c.req.raw.body,
+  });
+  return await container.fetch(req);
+});
+
 // Proxy POST /v1/print/white-ink
 app.post("/v1/print/white-ink", async (c) => {
   const container = c.env.PDF_API.get(

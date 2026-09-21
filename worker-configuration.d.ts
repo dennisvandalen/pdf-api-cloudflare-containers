@@ -4,6 +4,7 @@
 declare namespace Cloudflare {
 	interface Env {
 		PDF_API: DurableObjectNamespace<import("./src/index").MyContainer>;
+		SPOT_LAYERS_SECRET?: string;
 	}
 }
 interface Env extends Cloudflare.Env {}
