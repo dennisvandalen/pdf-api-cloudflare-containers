@@ -90,3 +90,25 @@ python render-tests/spot_layers_test.py
 Runs the real fixtures through and separates the result with Ghostscript: the
 page size, one group per finish, the artwork on the spot plate, nothing of it
 on a process plate, and each refusal by name.
+
+## Where it runs
+
+There are two implementations, held to the same checks and producing the same
+file byte for byte's worth of ink:
+
+| | `container_src/spot_layers.py` | [spot-layers-worker](https://github.com/dennisvandalen/spot-layers-worker) |
+| --- | --- | --- |
+| Runs on | the container, behind the Hono worker | a Python Worker, on its own |
+| PDF library | pikepdf (QPDF) | pypdf |
+| The print | decoded by Pillow, re-deflated | its own IDAT bytes, as `/Predictor 15` |
+| Needs | Ghostscript, ImageMagick, a cold start | nothing |
+
+The Worker lives in its own repository because this is the one route in this
+API that shells out to nothing — it only reads PDFs, rewrites their paints and
+writes one back. The rest of the container (the `tiffsep` separations, the
+previews, `cairosvg`, the Ghostscript pinned to 9.55) cannot follow it and is
+not meant to.
+
+Compared against this implementation on the real foil proofs: the A3 poster
+and the A5 sheet come back pixel-identical at 100, 150 and 300 dpi, and
+Ghostscript separates them to the same ink on every plate.
