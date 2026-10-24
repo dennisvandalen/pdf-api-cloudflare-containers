@@ -10,8 +10,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# System dependencies for PDF pipeline (ghostscript built from source below)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# System dependencies for PDF pipeline (ghostscript built from source below).
+# Upgrade first: install alone leaves base-image packages (e.g. libbrotli1,
+# CVE-2026-111497) at their old, unpatched versions.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     imagemagick \
     mupdf-tools \
     libcairo2-dev \
